@@ -10,3 +10,8 @@
 ```
 python train.py --device 0 --data "./data/padded_cow_data_obb.yaml" --epochs 200 --batch-size 32 --img 1024 --hyp "data/hyps/obb/hyp.finetune_dota_CloseAug.yaml" --workers 8 --entity aulrichsen
 ```
+
+# Detect
+```
+python detect.py --weights 'runs/train/exp15/weights/best.pt' --source 'dataset/cow_obb_padded/test/images' --imgs 1024 --device 0 --visualize --hide-labels
+```

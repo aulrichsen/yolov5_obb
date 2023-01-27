@@ -24,3 +24,6 @@ python detect.py --weights 'runs/train/exp15/weights/best.pt' --source 'dataset/
 ```
 python detect.py --weights 'runs/train/exp18/weights/best.pt' --source 'dataset/cow_obb_padded/test/images' --imgs 2048 --device 0 --hide-labels
 ```
+```
+python detect.py --weights 'weights/cow_obb_best_weights.pt' --source 'dataset/barn_videos' --imgs 1024 --device 0 --hide-labels
+```

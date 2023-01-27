@@ -12,11 +12,13 @@ Usage:
                                                              'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream
 """
 
+import math
 import argparse
 import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -71,10 +73,6 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if is_url and is_file:
         source = check_file(source)  # download
 
-    # Directories
-    save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
-    (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
-
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn)
@@ -95,81 +93,74 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
         bs = 1  # batch_size
-    vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
     model.warmup(imgsz=(1, 3, *imgsz), half=half)  # warmup
-    dt, seen = [0.0, 0.0, 0.0], 0
-    for path, im, im0s, vid_cap, s in dataset:
-        t1 = time_sync()
+    for frame, (path, im, im0, vid_cap, s) in enumerate(dataset):
+        print("frame:", frame)
+
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
         im /= 255  # 0 - 255 to 0.0 - 1.0
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
-        t2 = time_sync()
-        dt[0] += t2 - t1
 
         # Inference
-        visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
         pred = model(im, augment=augment, visualize=visualize)
-        t3 = time_sync()
-        dt[1] += t3 - t2
 
         # NMS
         # pred: list*(n, [xylsθ, conf, cls]) θ ∈ [-pi/2, pi/2)
         pred = non_max_suppression_obb(pred, conf_thres, iou_thres, classes, agnostic_nms, multi_label=True, max_det=max_det)
-        dt[2] += time_sync() - t3
 
-        # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
-
-        # Process predictions
-        for i, det in enumerate(pred):  # per image
-            pred_poly = rbox2poly(det[:, :5]) # (n, [x1 y1 x2 y2 x3 y3 x4 y4])
-            seen += 1
-            if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
-                s += f'{i}: '
-            else:
-                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
-
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
+        #center, w, h, theta = pred[:2], pred[2:3], pred[3:4], pred[4:5]
             
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                else:  # 'video' or 'stream'
-                    if vid_path[i] != save_path:  # new video
-                        vid_path[i] = save_path
-                        if isinstance(vid_writer[i], cv2.VideoWriter):
-                            vid_writer[i].release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path += '.mp4'
-                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer[i].write(im0)
+        for frame_pred in pred:   # Iterate through each frame prediction
+            
+            # Fixed width and height
+            frame_pred[:, 2] = 200
+            frame_pred[:, 3] = 100
 
-    # Print results
-    t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
-    LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
-    if save_txt or save_img:
-        s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
-    if update:
-        strip_optimizer(weights)  # update model (to fix SourceChangeWarning)
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            if len(frame_pred):
+                pred_poly = rbox2poly(frame_pred[:, :5]) # (n, [x1 y1 x2 y2 x3 y3 x4 y4])
+                # Rescale polys from img_size to im0 size
+                # det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                pred_poly = scale_polys(im.shape[2:], pred_poly, im0.shape)
+                frame_pred = torch.cat((pred_poly, frame_pred[:, -2:]), dim=1) # (n, [poly conf cls])
 
+                # Write results
+                for *poly, conf, cls in reversed(frame_pred):
+
+                    if save_img or save_crop or view_img:  # Add poly to image
+                        c = int(cls)  # integer class
+                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                        # annotator.box_label(xyxy, label, color=colors(c, True))
+                        annotator.poly_label(poly, label, color=colors(c, True))
+                        
+
+            # Stream results
+            im0 = annotator.result()
+            if view_img:
+                im0 = cv2.resize(im0, (int(im0.shape[1]/2), int(im0.shape[0]/2)))
+                cv2.imshow("Predictions", im0)
+                cv2.waitKey(1)  # 1 millisecond
+
+
+'''
+            center, w, h, theta = detection[:2], detection[2:3], detection[3:4], detection[4:5]
+            #Cos, Sin = torch.cos(theta), torch.sin(theta)
+            theta = math.degrees(theta)
+            if h > w:
+                # Correct angle to be relative to head
+                if theta > 0:
+                    theta -=90
+                else:
+                    theta += 90
+
+            print("center:", center)
+            print("theta:", theta)
+'''
 
 def parse_opt():
     parser = argparse.ArgumentParser()

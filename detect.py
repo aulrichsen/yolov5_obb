@@ -140,7 +140,44 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
             s += '%gx%g ' % im.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
-            
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            if len(det):
+                # Rescale polys from img_size to im0 size
+                # det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                pred_poly = scale_polys(im.shape[2:], pred_poly, im0.shape)
+                det = torch.cat((pred_poly, det[:, -2:]), dim=1) # (n, [poly conf cls])
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                for *poly, conf, cls in reversed(det):
+                    if save_txt:  # Write to file
+                        # xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                        poly = poly.tolist()
+                        line = (cls, *poly, conf) if save_conf else (cls, *poly)  # label format
+                        with open(txt_path + '.txt', 'a') as f:
+                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                    if save_img or save_crop or view_img:  # Add poly to image
+                        c = int(cls)  # integer class
+                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                        # annotator.box_label(xyxy, label, color=colors(c, True))
+                        annotator.poly_label(poly, label, color=colors(c, True))
+                        if save_crop: # Yolov5-obb doesn't support it yet
+                            # save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                            pass
+
+            # Print time (inference-only)
+            LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+
+            # Stream results
+            im0 = annotator.result()
+            if view_img:
+                cv2.imshow(str(p), im0)
+                cv2.waitKey(1)  # 1 millisecond
 
             # Save results (image with detections)
             if save_img:

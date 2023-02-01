@@ -22,6 +22,7 @@ import numpy as np
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
+import matplotlib.pyplot as plt
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -37,9 +38,14 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
 from utils.rboxs_utils import poly2rbox, rbox2poly
 
+from utils.augmentations import letterbox
 
-@torch.no_grad()
-def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
+
+#@torch.no_grad()
+class YoloV5_OBB():
+
+    def __init__(self,
+        weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         imgsz=(640, 640),  # inference size (height, width)
         conf_thres=0.25,  # confidence threshold
@@ -65,87 +71,151 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         ):
-    source = str(source)
-    save_img = not nosave and not source.endswith('.txt')  # save inference images
-    is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
-    is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
-    webcam = source.isnumeric() or source.endswith('.txt') or (is_url and not is_file)
-    if is_url and is_file:
-        source = check_file(source)  # download
 
-    # Load model
-    device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn)
-    stride, names, pt, jit, onnx, engine = model.stride, model.names, model.pt, model.jit, model.onnx, model.engine
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+        self.view_img = view_img
+        self.imgsz = imgsz
+        self.conf_thres = conf_thres
+        self.iou_thres = iou_thres 
+        self.classes = classes
+        self.agnostic_nms = agnostic_nms 
+        self.max_det = max_det
+        self.line_thickness = line_thickness
+        self.hide_labels=hide_labels,  # hide labels
+        self.hide_conf=hide_conf,  # hide confidences 
+        self.half = half
 
-    # Half
-    half &= (pt or jit or engine) and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt or jit:
-        model.model.half() if half else model.model.float()
+        # Load model
+        self.device = select_device(device)
+        self.model = DetectMultiBackend(weights, device=self.device, dnn=dnn)
+        self.stride, self.names, self.pt, jit, onnx, engine = self.model.stride, self.model.names, self.model.pt, self.model.jit, self.model.onnx, self.model.engine
+        imgsz = check_img_size(imgsz, s=self.stride)  # check image size
 
-    # Dataloader
-    if webcam:
-        view_img = check_imshow()
-        cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
-        bs = len(dataset)  # batch_size
-    else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+        # Half
+        half &= (self.pt or jit or engine) and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+        if self.pt or jit:
+            self.model.model.half() if half else self.model.model.float()
+
+        # Run inference
+        self.model.warmup(imgsz=(1, 3, *imgsz), half=half)  # warmup
+
+
+    def video_inference(self, source):
+        source = str(source)
+        is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
+        
+        # Dataloader    
+        dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt)
         bs = 1  # batch_size
 
-    # Run inference
-    model.warmup(imgsz=(1, 3, *imgsz), half=half)  # warmup
-    for frame, (path, im, im0, vid_cap, s) in enumerate(dataset):
-        print("frame:", frame)
+        for frame, (path, im, im0, vid_cap, s) in enumerate(dataset):
+            im = torch.from_numpy(im).to(self.device)
+            im = im.half() if self.half else im.float()  # uint8 to fp16/32
+            im /= 255  # 0 - 255 to 0.0 - 1.0
+            if len(im.shape) == 3:
+                im = im[None]  # expand for batch dim
+            
+            #print("frame:", frame)
+            pred = self.inference(im)
+            #print(im.shape, im0.shape)
 
-        im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
+            for frame_pred in pred:   # Iterate through each frame prediction
+                
+                if self.view_img:
+                    
+                    # Stream results
+                    print(frame_pred.shape, im.shape, im0.shape)
+                    im0 = self.annotate_img(im0, im, frame_pred)
+                    im0 = self.resize_img(im0, scale=2)
+                    cv2.imshow("Predictions", im0)
+                    cv2.waitKey(1)  # 1 millisecond
+
+    def resize_img(self, im0, scale=2):
+        return cv2.resize(im0, (int(im0.shape[1]/scale), int(im0.shape[0]/scale)))
+        
+
+    def annotate_img(self, im0, im, frame_pred):
+        annotator = Annotator(im0, line_width=self.line_thickness, example=str(self.names))
+        if len(frame_pred):
+            pred_poly = rbox2poly(frame_pred[:, :5]) # (n, [x1 y1 x2 y2 x3 y3 x4 y4])
+            # Rescale polys from img_size to im0 size
+            # det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+            pred_poly = scale_polys(im.shape[2:], pred_poly, im0.shape)
+            frame_pred = torch.cat((pred_poly, frame_pred[:, -2:]), dim=1) # (n, [poly conf cls])
+
+            # Write results
+            for *poly, conf, cls in reversed(frame_pred):
+                c = int(cls)  # integer class
+                label = None if self.hide_labels else (self.names[c] if self.hide_conf else f'{self.names[c]} {conf:.2f}')
+                # annotator.box_label(xyxy, label, color=colors(c, True))
+                annotator.poly_label(poly, label, color=colors(c, True))
+                    
+        # Stream results
+        return annotator.result()
+
+
+    def inference(self, im):    
+
+        # Inference
+        with torch.no_grad():
+            pred = self.model(im, augment=False, visualize=False)
+
+        # NMS
+        # pred: list*(n, [xylsθ, conf, cls]) θ ∈ [-pi/2, pi/2)
+        pred = non_max_suppression_obb(pred, self.conf_thres, self.iou_thres, self.classes, self.agnostic_nms, multi_label=True, max_det=self.max_det)
+
+        #center, w, h, theta = pred[:2], pred[2:3],im0 pred[3:4], pred[4:5]
+            
+        return pred
+
+    def get_centre_and_angle(self, im):
+        '''
+        returns list of 2d arrays, each list element is cow detections for a give frame (batch index)
+        dim 0 is cows
+        dim 1 is x, y, angle (radians)
+        '''
+
+        pred = self.inference(im)
+
+        center_and_angle = []
+        for frame_pred in pred:     # Iterate through the prediction batch        
+            center, w, h, theta = frame_pred[:, :2], frame_pred[:, 2:3], frame_pred[:, 3:4], frame_pred[:, 4:5]
+
+            #print(center)
+            #print(theta)
+            center_and_angle.append(torch.cat((center, theta), dim=1))
+
+        return center_and_angle
+
+
+    def load_image(self, img_file):
+        '''
+        im is preprocessed image
+        im0 is original image loaded in with opencv
+        '''
+        
+        im0 = cv2.imread(img_file)
+        img = self.pre_process_image(im0)
+        return img, im0
+
+    def pre_process_image(self, img0):
+        """
+        Pre-process an image loaded in with opencv
+        """
+        
+        # Padded resize
+        im = letterbox(img0, self.imgsz, stride=self.stride, auto=self.pt)[0]
+
+        # Convert
+        im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        im = np.ascontiguousarray(im)
+
+        im = torch.from_numpy(im).to(self.device)
+        im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255  # 0 - 255 to 0.0 - 1.0
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
 
-        # Inference
-        pred = model(im, augment=augment, visualize=visualize)
-
-        # NMS
-        # pred: list*(n, [xylsθ, conf, cls]) θ ∈ [-pi/2, pi/2)
-        pred = non_max_suppression_obb(pred, conf_thres, iou_thres, classes, agnostic_nms, multi_label=True, max_det=max_det)
-
-        #center, w, h, theta = pred[:2], pred[2:3], pred[3:4], pred[4:5]
-            
-
-        for frame_pred in pred:   # Iterate through each frame prediction
-            
-            # Fixed width and height
-            frame_pred[:, 2] = 200
-            frame_pred[:, 3] = 100
-
-            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            if len(frame_pred):
-                pred_poly = rbox2poly(frame_pred[:, :5]) # (n, [x1 y1 x2 y2 x3 y3 x4 y4])
-                # Rescale polys from img_size to im0 size
-                # det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
-                pred_poly = scale_polys(im.shape[2:], pred_poly, im0.shape)
-                frame_pred = torch.cat((pred_poly, frame_pred[:, -2:]), dim=1) # (n, [poly conf cls])
-
-                # Write results
-                for *poly, conf, cls in reversed(frame_pred):
-
-                    if save_img or save_crop or view_img:  # Add poly to image
-                        c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        # annotator.box_label(xyxy, label, color=colors(c, True))
-                        annotator.poly_label(poly, label, color=colors(c, True))
-                        
-
-            # Stream results
-            im0 = annotator.result()
-            if view_img:
-                im0 = cv2.resize(im0, (int(im0.shape[1]/2), int(im0.shape[0]/2)))
-                cv2.imshow("Predictions", im0)
-                cv2.waitKey(1)  # 1 millisecond
-
+        return im
 
 '''
             center, w, h, theta = detection[:2], detection[2:3], detection[3:4], detection[4:5]
@@ -158,7 +228,8 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                 else:
                     theta += 90
 
-            print("center:", center)
+            print("center:", center)print(model.inference(im))
+
             print("theta:", theta)
 '''
 
@@ -197,8 +268,34 @@ def parse_opt():
 
 def main(opt):
     check_requirements(exclude=('tensorboard', 'thop'))
-    run(**vars(opt))
+    model = YoloV5_OBB(**vars(opt))
 
+    #model.video_inference(source=opt.source)
+
+    img_file = 'dataset/cow_obb_padded/test/images/501_20211010T140000z_orig.jpg'
+    im, im0 = model.load_image(img_file)
+    pred = model.inference(im)
+
+    annotated_img = model.annotate_img(im0, im, pred[0])
+    annotated_img = model.resize_img(annotated_img)
+    cv2.imshow("Predictions:", annotated_img)
+    cv2.waitKey(0)
+    
+    im, im0 = model.load_image(img_file)
+    #pred = model.inference(im)
+
+    centre_and_angle = model.get_centre_and_angle(im)[0]
+    pred = torch.zeros(centre_and_angle.shape[0], 5)
+    pred[:, :2] = centre_and_angle[:, :2]
+    pred[:, 2] = 200    # Box length
+    pred[:, 3] = 70    # Box Width
+    pred[:, 4] = centre_and_angle[:, 2]
+    pred = [pred]
+
+    annotated_img = model.annotate_img(im0, im, pred[0])
+    annotated_img = model.resize_img(annotated_img)
+    cv2.imshow("Center and Angle Predictions (Fixed Box Size):", annotated_img)
+    cv2.waitKey(0)
 
 if __name__ == "__main__":
     opt = parse_opt()

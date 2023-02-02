@@ -45,9 +45,9 @@ from utils.augmentations import letterbox
 class YoloV5_OBB():
 
     def __init__(self,
-        weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
+        weights=ROOT / 'weights/cow_obb_best_weights.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
-        imgsz=(640, 640),  # inference size (height, width)
+        imgsz=(1024, 1024),  # inference size (height, width)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image

@@ -235,9 +235,9 @@ class YoloV5_OBB():
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'runs/train/yolov5n_DroneVehicle/weights/best.pt', help='model path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'weights/cow_obb_best_weights.pt', help='model path(s)')
     parser.add_argument('--source', type=str, default='/media/test/4d846cae-2315-4928-8d1b-ca6d3a61a3c6/DroneVehicle/val/raw/images/', help='file/dir/URL/glob, 0 for webcam')
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[840], help='inference size h,w')
+    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[1024], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.2, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
@@ -252,7 +252,6 @@ def parse_opt():
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
     parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--project', default='runs/detect', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=2, type=int, help='bounding box thickness (pixels)')
@@ -272,6 +271,7 @@ def main(opt):
 
     #model.video_inference(source=opt.source)
 
+    # Get raw predictions on example image
     img_file = 'dataset/cow_obb_padded/test/images/501_20211010T140000z_orig.jpg'
     im, im0 = model.load_image(img_file)
     pred = model.inference(im)
@@ -284,6 +284,9 @@ def main(opt):
     im, im0 = model.load_image(img_file)
     #pred = model.inference(im)
 
+    
+
+    # Get centre and angle and fix bounding box sizes (200 x 70)
     centre_and_angle = model.get_centre_and_angle(im)[0]
     pred = torch.zeros(centre_and_angle.shape[0], 5)
     pred[:, :2] = centre_and_angle[:, :2]
